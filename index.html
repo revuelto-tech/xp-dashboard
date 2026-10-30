@@ -1,0 +1,449 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>XP 设备管理</title>
+<!--
+  XP 的“所有设备”隐藏页的网页版（2026-10-30 用户要求：放到 Netlify / Vercel，不放在 APK 里）。
+  浏览器直接连巴法云的 MQTT（wss://bemfa.com:9504/wss），主题、消息格式同 DeviceRegistry 的“巴法云”一段：
+  - 报告主题（默认 xptest）：每台设备的报告 {id, from, to, current, army, running, version, updated, applied, settings, requests, packs, bans}，不保留。
+  - 命令主题（默认 xptest2）：保留的命令表 {cmds: {设备号: 改动}, ask}；设备只看自己的那一项，sent 比自己 applied 新才用，ask 变了就报告一次。
+  页面里不放任何密钥：巴法云私钥在页面里填，只存在这个浏览器（localStorage）。
+-->
+<script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #fff; --text: #222; --muted: #777; --line: #e3e5e8;
+    --blue: #3b83ff; --blue-soft: #eaf2ff; --green: #18a058; --orange: #e8890c; --red: #e5484d; --gray: #b5b8bd;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #15171a; --card: #1e2125; --text: #e6e6e6; --muted: #9aa0a6; --line: #30343a; --blue-soft: #1d2a40; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 12px 16px 60px; }
+  h1 { font-size: 18px; margin: 0; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-top: 12px; }
+  .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .grow { flex: 1; }
+  button { font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--text); border-radius: 8px; padding: 6px 12px; cursor: pointer; }
+  button.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+  button.danger { color: var(--red); }
+  button:disabled { opacity: .45; cursor: default; }
+  input[type=text], input[type=password], input[type=number] {
+    font: inherit; color: var(--text); background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; min-width: 0;
+  }
+  input[type=number] { width: 90px; }
+  .chip { display: inline-block; border-radius: 999px; padding: 1px 9px; font-size: 12px; background: var(--blue-soft); color: var(--blue); }
+  .chip.green { background: rgba(24,160,88,.12); color: var(--green); }
+  .chip.orange { background: rgba(232,137,12,.12); color: var(--orange); }
+  .chip.gray { background: rgba(140,140,140,.15); color: var(--muted); }
+  .muted { color: var(--muted); font-size: 12px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; background: var(--gray); }
+  .dot.run { background: var(--green); } .dot.stale { background: var(--orange); }
+  .dev { border-top: 1px solid var(--line); padding: 9px 4px; cursor: pointer; }
+  .dev:first-child { border-top: 0; }
+  .dev.sel { background: var(--blue-soft); box-shadow: inset 3px 0 var(--blue); }
+  .dev .id { font-weight: 600; }
+  .pending { color: var(--orange); font-size: 12px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px; }
+  .set { border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; display: flex; align-items: center; gap: 8px; }
+  .set.changed { border-color: var(--blue); background: var(--blue-soft); }
+  .set label { flex: 1; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .seg button { border: 0; border-radius: 0; }
+  .seg button.on { background: var(--blue-soft); color: var(--blue); }
+  #toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: rgba(0,0,0,.8); color: #fff; padding: 8px 14px; border-radius: 8px; display: none; max-width: 90%; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  td { border-top: 1px solid var(--line); padding: 5px 4px; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- 登录：巴法云私钥只存在这个浏览器 -->
+  <div id="login" class="card hidden">
+    <h1>XP 设备管理</h1>
+    <p class="muted">填巴法云私钥（同 local.properties 的 xp.bemfa.key）。只存在这个浏览器里，页面文件里没有。</p>
+    <div class="row"><input id="key" type="password" class="grow" placeholder="巴法云私钥"></div>
+    <div class="row" style="margin-top:8px">
+      <span class="muted">报告主题</span><input id="stateTopic" type="text" value="xptest" style="width:110px">
+      <span class="muted">命令主题</span><input id="cmdTopic" type="text" value="xptest2" style="width:110px">
+    </div>
+    <div class="row" style="margin-top:10px"><button class="primary" onclick="login()">进入</button><span id="loginErr" class="muted"></span></div>
+  </div>
+
+  <div id="main" class="hidden">
+    <div class="row">
+      <h1 class="grow">所有设备</h1>
+      <span id="conn" class="chip gray">未连接</span>
+      <button onclick="refresh()">↻ 刷新</button>
+      <button onclick="logout()">退出</button>
+    </div>
+    <div id="summary" class="row" style="margin-top:8px"></div>
+
+    <div class="card">
+      <div class="row">
+        <button onclick="toggleAll()" id="selAll">全选</button>
+        <span id="selCount" class="muted"></span>
+        <span class="grow"></span>
+        <button class="cmd" onclick="command('start')">开始</button>
+        <button class="cmd danger" onclick="command('stop')">停止</button>
+        <button class="cmd" onclick="command('restart')">重启</button>
+        <button class="cmd" id="pushBtn" onclick="togglePush()">设置</button>
+      </div>
+
+      <!-- 推送设置：显示勾上的第一台设备报告的值，只发改过的 -->
+      <div id="push" class="hidden" style="margin-top:12px">
+        <div id="pushFrom" class="muted"></div>
+        <div class="row" style="margin-top:8px">
+          <span>账号</span><input id="pFrom" type="number"> - <input id="pTo" type="number">
+          <span style="margin-left:12px">账号记忆</span><input id="pMemory" type="number" placeholder="空 = 从头">
+        </div>
+        <div class="row" style="margin-top:8px">
+          <span>军队链接：</span>
+          <span class="seg" id="pArmy">
+            <button data-v="off">关</button><button data-v="basic">基础</button><button data-v="advanced">高级</button>
+          </span>
+        </div>
+        <div id="pSettings" class="grid" style="margin-top:10px"></div>
+        <div class="row" style="margin-top:10px">
+          <label><input type="checkbox" id="pRestart" checked> 在跑的设备发完重启（脚本重新开始时才读设置）</label>
+          <span class="grow"></span>
+          <button class="primary" onclick="sendSettings()">发给勾上的设备</button>
+        </div>
+      </div>
+
+      <div id="devices" style="margin-top:10px"></div>
+    </div>
+
+    <div class="card">
+      <div class="row"><b class="grow">封号</b><span id="banCount" class="muted"></span></div>
+      <table id="bans"></table>
+    </div>
+  </div>
+</div>
+<div id="toast"></div>
+
+<script>
+'use strict';
+// ---- 常量（同 DeviceRegistry） ----
+const STALE_MS = 25 * 60_000;      // 超过这么久没报告 = 可能已离线
+const RESEND_MS = 15_000;          // 连着的设备这么久没报告用上就再发一次命令表
+const REQUEST_WINDOW_MS = 10 * 60_000;
+const ASK_WAIT_MS = 3_000;
+const CMD_NAMES = { start: '开始', stop: '停止', restart: '重启' };
+const ARMY_NAMES = { off: '关', basic: '基础', advanced: '高级' };
+// 推送设置里的名字（同 assets/ui/coc_request.lua）；账号范围、存档文件夹以外不认识的 key 照 key 显示。
+const LABELS = {
+  account_memory: '账号记忆', reverse: '反序运行', device_slow: '设备卡顿',
+  auto_off: '轮后关', auto_off_laps: '轮后关的轮数', auto_off_army_link: '轮后关：军队链接（基础 / 高级）',
+  data_dir: '存档文件夹 /sdcard/', retry_empty_load: '空援重载',
+  use_request_message: '请求内容', request_message: '请求内容的字',
+  join_clan: '进部落', clan_tag: '部落标签', clan_code: '暗号',
+  leave_clan: '求援后退部落', leave_clan_min_ms: '退部落最少（毫秒）', leave_clan_max_ms: '退部落最多（毫秒）',
+  wait_after_last: '末号等', wait_after_last_s: '末号等（秒）',
+  wait_cooldown: '等求援冷却', cooldown_minutes: '等求援冷却 ≤（分）',
+};
+// 这些不在设置格子里（上面单独改）。
+const NOT_IN_GRID = new Set(['account_from', 'account_to']);
+
+// ---- 状态 ----
+let client = null;
+let cfg = load('xp_dash_cfg') || null;
+let states = load('xp_dash_states') || {};   // 设备号 → 报告
+let cmds = {};          // 设备号 → 发出的改动（还没用上的才算，见 pending）
+let ask = 0;            // 命令表里的 ask
+let gotCmds = false;    // 收到过保留的命令表（发之前要先有它，不然会把别人的盖掉）
+let selected = new Set(load('xp_dash_sel') || []);
+let pushOpen = false;
+let pushBase = null;    // 推送设置打开时的值（比对改过没有）
+
+function load(k) { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } }
+function save(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
+function $(id) { return document.getElementById(id); }
+function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+function toast(msg) { const t = $('toast'); t.textContent = msg; t.style.display = 'block'; clearTimeout(toast.t); toast.t = setTimeout(() => t.style.display = 'none', 3000); }
+function ago(ms) {
+  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (s < 60) return '刚刚';
+  if (s < 3600) return Math.floor(s / 60) + ' 分钟前';
+  if (s < 86400) return Math.floor(s / 3600) + ' 小时前';
+  return Math.floor(s / 86400) + ' 天前';
+}
+
+// ---- 登录 / 连接 ----
+function login() {
+  const key = $('key').value.trim();
+  if (!key) { $('loginErr').textContent = '先填私钥'; return; }
+  cfg = { key, state: $('stateTopic').value.trim() || 'xptest', cmd: $('cmdTopic').value.trim() || 'xptest2' };
+  save('xp_dash_cfg', cfg);
+  start();
+}
+function logout() {
+  if (client) client.end(true);
+  localStorage.removeItem('xp_dash_cfg');
+  location.reload();
+}
+function start() {
+  $('login').classList.add('hidden');
+  $('main').classList.remove('hidden');
+  render();
+  setConn('连接中…', 'gray');
+  // 巴法云的客户端 id 只能是私钥（所有设备同一个，几个连接可以同时连着）。QoS 1 它不回 PUBACK，所以发 QoS 0。
+  client = mqtt.connect('wss://bemfa.com:9504/wss', { clientId: cfg.key, clean: true, reconnectPeriod: 5000, connectTimeout: 10000 });
+  client.on('connect', () => {
+    setConn('已连接', 'green');
+    gotCmds = false;
+    client.subscribe([cfg.cmd, cfg.state], { qos: 0 });
+    // 等保留的命令表最多 2 秒，再问所有设备报告一次。
+    setTimeout(() => { gotCmds = true; refresh(); }, 2000);
+  });
+  client.on('reconnect', () => setConn('重连中…', 'orange'));
+  client.on('close', () => setConn('已断开', 'gray'));
+  client.on('error', e => { setConn('出错', 'orange'); toast('巴法云：' + (e && e.message || e)); });
+  client.on('message', (topic, payload) => {
+    let msg; try { msg = JSON.parse(new TextDecoder().decode(payload)); } catch { return; }
+    if (topic === cfg.cmd) onCmds(msg);
+    else if (topic === cfg.state) onState(msg);
+  });
+}
+function setConn(text, color) { const c = $('conn'); c.textContent = text; c.className = 'chip ' + color; }
+
+function onCmds(root) {
+  if (!root || typeof root !== 'object') return;
+  gotCmds = true;
+  ask = Math.max(ask, Number(root.ask) || 0);
+  // 留 sent 新的（同 putNewer）。
+  for (const [id, c] of Object.entries(root.cmds || {})) {
+    if (!cmds[id] || (c.sent || 0) >= (cmds[id].sent || 0)) cmds[id] = c;
+  }
+  render();
+}
+function onState(s) {
+  if (!s || !s.id) return;
+  const old = states[s.id];
+  if (old && (old.updated || 0) > (s.updated || 0)) return;
+  states[s.id] = s;
+  save('xp_dash_states', states);
+  scheduleRender();
+}
+let renderTimer = 0;
+function scheduleRender() { clearTimeout(renderTimer); renderTimer = setTimeout(render, 300); }
+
+// ---- 命令表 ----
+// 设备 id 还没用上的改动：sent 比它报告里的 applied 新才算。
+function pending(id) {
+  const c = cmds[id];
+  if (!c) return null;
+  return (c.sent || 0) > ((states[id] && states[id].applied) || 0) ? c : null;
+}
+// 发整张命令表（只放还没用上的）；newAsk = 让所有设备报告一次。
+function publishCmds(newAsk) {
+  if (!client || !client.connected) { toast('还没连上巴法云'); return false; }
+  if (!gotCmds) { toast('还在读命令表，稍等再试'); return false; }
+  const table = {};
+  for (const id of Object.keys(cmds)) { const p = pending(id); if (p) table[id] = p; }
+  if (newAsk) ask = Date.now();
+  client.publish(cfg.cmd, JSON.stringify({ cmds: table, ask }), { qos: 0, retain: true });
+  return true;
+}
+// 给设备 id 发改动：和还没用上的合在一起，写上发出的时间。
+function request(ids, modify) {
+  if (!ids.length) { toast('先勾上要管理的设备'); return false; }
+  for (const id of ids) {
+    const root = Object.assign({}, pending(id) || {});
+    modify(root, id);
+    root.sent = Date.now();
+    cmds[id] = root;
+  }
+  const ok = publishCmds(false);
+  render();
+  return ok;
+}
+function refresh() {
+  if (publishCmds(true)) { toast('已让所有设备报告一次…'); setTimeout(render, ASK_WAIT_MS); }
+}
+// 送达确认：连着的设备发出去 RESEND_MS 还没报告用上，再发一次（设备按 sent 只用一次，重发不会做两遍）。
+setInterval(() => {
+  if (!client || !client.connected || !gotCmds) return;
+  const now = Date.now();
+  const waiting = Object.keys(cmds).some(id => {
+    const p = pending(id), s = states[id];
+    return p && now - (p.sent || 0) >= RESEND_MS && s && now - (s.updated || 0) < STALE_MS;
+  });
+  if (waiting) publishCmds(false);
+}, RESEND_MS);
+setInterval(render, 30_000); // “几分钟前”跟着走
+
+// ---- 操作 ----
+function selectedIds() { return [...selected].filter(id => states[id]); }
+function command(name) {
+  const ids = selectedIds();
+  if (request(ids, r => { r.command = name; })) toast(`已发 ${CMD_NAMES[name]} 给 ${ids.length} 台`);
+}
+function toggleAll() {
+  const ids = Object.keys(states);
+  if (ids.every(id => selected.has(id))) selected.clear(); else ids.forEach(id => selected.add(id));
+  save('xp_dash_sel', [...selected]);
+  if (pushOpen) openPush();
+  render();
+}
+function toggleDevice(id) {
+  if (selected.has(id)) selected.delete(id); else selected.add(id);
+  save('xp_dash_sel', [...selected]);
+  if (pushOpen) openPush();
+  render();
+}
+
+// ---- 推送设置 ----
+function togglePush() {
+  if (pushOpen) { pushOpen = false; $('push').classList.add('hidden'); render(); return; }
+  if (!selectedIds().length) { toast('先勾上要管理的设备'); return; }
+  pushOpen = true;
+  openPush();
+  render();
+}
+function openPush() {
+  const ids = selectedIds();
+  if (!ids.length) { pushOpen = false; $('push').classList.add('hidden'); return; }
+  const s = states[ids[0]];
+  const settings = Object.assign({}, s.settings || {});
+  const armies = new Set(ids.map(id => states[id].army || 'off'));
+  pushBase = {
+    from: s.from ?? '', to: s.to ?? '', memory: s.current ?? '',
+    army: armies.size === 1 ? [...armies][0] : null, settings,
+  };
+  $('pushFrom').textContent = `显示的是 ${s.id} 的设置` + (ids.length > 1 ? `（勾了 ${ids.length} 台，只发改过的项）` : '');
+  $('pFrom').value = pushBase.from; $('pTo').value = pushBase.to; $('pMemory').value = pushBase.memory;
+  setArmy(pushBase.army);
+  const grid = $('pSettings');
+  grid.innerHTML = '';
+  for (const [key, value] of Object.entries(settings)) {
+    if (NOT_IN_GRID.has(key)) continue;
+    const box = document.createElement('div');
+    box.className = 'set';
+    box.dataset.key = key;
+    const label = `<label>${esc(LABELS[key] || key)}</label>`;
+    if (typeof value === 'boolean') {
+      box.innerHTML = label + `<input type="checkbox" ${value ? 'checked' : ''}>`;
+    } else if (typeof value === 'number' || (value === '' && /_(ms|s|laps|minutes)$/.test(key))) {
+      box.innerHTML = label + `<input type="number" value="${esc(value)}">`;
+    } else {
+      box.innerHTML = label + `<input type="text" value="${esc(value)}" style="width:120px">`;
+    }
+    box.querySelector('input').addEventListener('input', () => box.classList.toggle('changed', changedValue(box) !== undefined));
+    grid.appendChild(box);
+  }
+  $('push').classList.remove('hidden');
+}
+function setArmy(v) {
+  for (const b of $('pArmy').children) b.classList.toggle('on', b.dataset.v === v);
+  $('pArmy').dataset.v = v || '';
+}
+$('pArmy') && $('pArmy').addEventListener('click', e => { if (e.target.dataset.v) setArmy(e.target.dataset.v); });
+// 格子改过时返回新值（数字框空着为 ""，同配置文件），没改为 undefined。
+function changedValue(box) {
+  const key = box.dataset.key, input = box.querySelector('input'), old = pushBase.settings[key];
+  let v;
+  if (input.type === 'checkbox') v = input.checked;
+  else if (input.type === 'number') v = input.value.trim() === '' ? '' : Number(input.value);
+  else v = input.value;
+  return v === old ? undefined : v;
+}
+function sendSettings() {
+  const ids = selectedIds();
+  const set = {};
+  for (const box of $('pSettings').children) { const v = changedValue(box); if (v !== undefined) set[box.dataset.key] = v; }
+  const from = $('pFrom').value.trim(), to = $('pTo').value.trim(), memory = $('pMemory').value.trim();
+  const rangeChanged = String(from) !== String(pushBase.from) || String(to) !== String(pushBase.to);
+  if (rangeChanged && (!/^\d+$/.test(from) || !/^\d+$/.test(to) || Number(from) > Number(to))) {
+    toast('账号范围不对（要填数字，起始号不能比结束号大）'); return;
+  }
+  const memoryChanged = String(memory) !== String(pushBase.memory);
+  if (memoryChanged && memory !== '' && !/^\d+$/.test(memory)) { toast('账号记忆要填数字'); return; }
+  const army = $('pArmy').dataset.v;
+  const armyChanged = army && army !== pushBase.army;
+  const n = Object.keys(set).length + (rangeChanged ? 1 : 0) + (memoryChanged ? 1 : 0) + (armyChanged ? 1 : 0);
+  if (!n) { toast('没有改动'); return; }
+  const restart = $('pRestart').checked;
+  const ok = request(ids, (r, id) => {
+    if (Object.keys(set).length) r.set_settings = Object.assign({}, r.set_settings || {}, set);
+    if (rangeChanged) { r.set_from = Number(from); r.set_to = Number(to); }
+    if (memoryChanged) r.set_memory = memory;  // "" = 清掉，从账号范围的第一个号跑
+    if (armyChanged) r.set_army = army;
+    if (restart && states[id].running && Object.keys(set).length) r.command = 'restart';
+  });
+  if (ok) { toast(`已发 ${n} 项给 ${ids.length} 台`); openPush(); }
+}
+
+// ---- 画页面 ----
+function render() {
+  const now = Date.now();
+  const ids = Object.keys(states).sort((a, b) => ((states[a].from ?? 1e15) - (states[b].from ?? 1e15)) || a.localeCompare(b));
+  const versions = ids.map(id => states[id].version).filter(Boolean);
+  const newest = versions.sort((a, b) => Number(b.split('.')[1] || 0) - Number(a.split('.')[1] || 0))[0];
+  let running = 0, stale = 0, old = 0;
+  const bans = {};
+  const rows = ids.map(id => {
+    const s = states[id];
+    const isStale = s.updated && now - s.updated > STALE_MS;
+    const isRun = s.running && !isStale;
+    if (isRun) running++;
+    if (isStale) stale++;
+    const oldVer = newest && s.version && s.version !== newest;
+    if (oldVer) old++;
+    for (const [k, b] of Object.entries(s.bans || {})) if (!bans[k] || (b.time || 0) > (bans[k].time || 0)) bans[k] = b;
+    const p = pending(id);
+    const reqs = (s.requests || []).filter(t => now - t < REQUEST_WINDOW_MS).length;
+    const notes = [];
+    if (p) {
+      if (p.command) notes.push('待执行：' + (CMD_NAMES[p.command] || p.command));
+      if (p.set_from) notes.push(`待生效范围：${p.set_from}–${p.set_to}`);
+      if (p.set_army) notes.push('待生效军队：' + ARMY_NAMES[p.set_army]);
+      if (p.set_settings) notes.push(`待生效设置 ${Object.keys(p.set_settings).length} 项`);
+      if ('set_memory' in p) notes.push('待生效账号记忆：' + (p.set_memory || '清空'));
+    }
+    return `<div class="dev ${selected.has(id) ? 'sel' : ''}" onclick="toggleDevice('${esc(id)}')">
+      <div class="row">
+        <input type="checkbox" ${selected.has(id) ? 'checked' : ''} onclick="event.stopPropagation(); toggleDevice('${esc(id)}')">
+        <span class="dot ${isRun ? 'run' : isStale ? 'stale' : ''}"></span>
+        <span class="id">${esc(id)}</span>
+        <span class="grow"></span>
+        <b>${esc(s.current ?? '')}</b>
+        <span class="muted">· ${s.updated ? ago(s.updated) : '?'} ·</span>
+        <span class="${oldVer ? 'pending' : 'muted'}">v${esc(s.version || '?')}</span>
+      </div>
+      <div class="row muted" style="margin-left:26px">
+        <span>账号 ${esc(s.from ?? '?')}–${esc(s.to ?? '?')}</span>
+        <span>· 10 分钟求援 ${reqs} 次</span>
+        <span class="grow"></span>
+        <span class="chip">军队 ${esc(ARMY_NAMES[s.army] || '?')}</span>
+      </div>
+      ${notes.length ? `<div class="pending" style="margin-left:26px">${esc(notes.join(' · '))}</div>` : ''}
+    </div>`;
+  });
+  $('devices').innerHTML = rows.join('') || '<p class="muted">还没有设备报告。点 ↻ 刷新 让连着的设备报告一次。</p>';
+  const chips = [`<span class="chip">${ids.length} 台</span>`, `<span class="chip green">运行中 ${running}</span>`];
+  if (stale) chips.push(`<span class="chip orange">可能已离线 ${stale}</span>`);
+  if (old) chips.push(`<span class="chip orange">${old} 台版本旧</span>`);
+  chips.push(`<span class="chip gray">封号 ${Object.keys(bans).length}</span>`);
+  $('summary').innerHTML = chips.join('');
+  const sel = selectedIds().length;
+  $('selCount').textContent = sel ? `已选 ${sel} 台` : '';
+  $('selAll').textContent = ids.length && ids.every(id => selected.has(id)) ? '取消全选' : '全选';
+  document.querySelectorAll('button.cmd').forEach(b => b.disabled = !sel && b.id !== 'pushBtn');
+  $('pushBtn').classList.toggle('primary', pushOpen);
+  const banList = Object.values(bans).sort((a, b) => (b.time || 0) - (a.time || 0));
+  $('banCount').textContent = banList.length ? `${banList.length} 个` : '';
+  $('bans').innerHTML = banList.map(b => `<tr><td>${esc(b.dir)}</td><td>${esc(b.id)}</td><td class="muted">${b.time ? ago(b.time) : ''}</td><td class="muted">${esc(b.device)} (${esc(b.range)})</td></tr>`).join('')
+    || '<tr><td class="muted">没有</td></tr>';
+}
+
+// ---- 开始 ----
+if (cfg && cfg.key) start(); else $('login').classList.remove('hidden');
+</script>
+</body>
+</html>
