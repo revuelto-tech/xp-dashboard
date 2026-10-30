@@ -443,6 +443,16 @@ function render() {
 }
 
 // ---- 开始 ----
+// 带私钥的书签链接（2026-10-30 用户要求：换浏览器也不用输）：…/#key=私钥（可再加 &state=主题&cmd=主题）。
+// # 后面的不会发给服务器；读完存进这个浏览器，再从地址栏去掉。
+(function fromLink() {
+  const p = new URLSearchParams(location.hash.slice(1));
+  const key = p.get('key');
+  if (!key) return;
+  cfg = { key, state: p.get('state') || 'xptest', cmd: p.get('cmd') || 'xptest2' };
+  save('xp_dash_cfg', cfg);
+  history.replaceState(null, '', location.pathname + location.search);
+})();
 if (cfg && cfg.key) start(); else $('login').classList.remove('hidden');
 </script>
 </body>
