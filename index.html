@@ -5,125 +5,224 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>XP 设备管理</title>
 <!--
-  XP 的“所有设备”隐藏页的网页版（2026-10-30 用户要求：放到 Netlify / Vercel，不放在 APK 里）。
+  XP 的“所有设备”隐藏页的网页版（2026-10-30 用户要求：放到 Netlify / Vercel，不放在 APK 里；布局用用户选的方案 B：紧凑表格 + 右边的设置抽屉）。
   浏览器直接连巴法云的 MQTT（wss://bemfa.com:9504/wss），主题、消息格式同 DeviceRegistry 的“巴法云”一段：
   - 报告主题（默认 xptest）：每台设备的报告 {id, from, to, current, army, running, version, updated, applied, settings, requests, packs, bans}，不保留。
   - 命令主题（默认 xptest2）：保留的命令表 {cmds: {设备号: 改动}, ask}；设备只看自己的那一项，sent 比自己 applied 新才用，ask 变了就报告一次。
-  页面里不放任何密钥：巴法云私钥在页面里填，只存在这个浏览器（localStorage）。
+  页面里不放任何密钥：巴法云私钥在页面里填（或书签链接 #key=…），只存在这个浏览器（localStorage）。
 -->
 <script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
 <style>
   :root {
-    --bg: #f4f5f7; --card: #fff; --text: #222; --muted: #777; --line: #e3e5e8;
-    --blue: #3b83ff; --blue-soft: #eaf2ff; --green: #18a058; --orange: #e8890c; --red: #e5484d; --gray: #b5b8bd;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg: #15171a; --card: #1e2125; --text: #e6e6e6; --muted: #9aa0a6; --line: #30343a; --blue-soft: #1d2a40; }
+    --bg: #0f1115; --panel: #151820; --card: #171a20; --input: #0f1115; --line: #262a33; --line2: #2c313b; --row: #1f232b;
+    --text: #e7e9ee; --soft: #c9ced8; --muted: #9aa1ad;
+    --blue: #4c8dff; --blue-bg: #18233a; --blue-tile: #1d2b47; --blue-text: #cfe0ff;
+    --green: #2fbf71; --red: #d94848; --orange: #f0a033; --btn: #262b35;
   }
   * { box-sizing: border-box; }
+  html, body { height: 100%; }
   body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, "PingFang SC", "Microsoft YaHei", sans-serif; }
-  .wrap { max-width: 860px; margin: 0 auto; padding: 12px 16px 60px; }
-  h1 { font-size: 18px; margin: 0; }
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-top: 12px; }
-  .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .grow { flex: 1; }
-  button { font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--text); border-radius: 8px; padding: 6px 12px; cursor: pointer; }
-  button.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
-  button.danger { color: var(--red); }
-  button:disabled { opacity: .45; cursor: default; }
-  input[type=text], input[type=password], input[type=number] {
-    font: inherit; color: var(--text); background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; min-width: 0;
+  button { font: inherit; cursor: pointer; }
+  button:disabled { opacity: .4; cursor: default; }
+  input[type=text], input[type=number], input[type=password] {
+    font: inherit; color: var(--text); background: var(--input); border: 1px solid var(--line2); border-radius: 8px; padding: 7px 9px; min-width: 0;
   }
-  input[type=number] { width: 90px; }
-  .chip { display: inline-block; border-radius: 999px; padding: 1px 9px; font-size: 12px; background: var(--blue-soft); color: var(--blue); }
-  .chip.green { background: rgba(24,160,88,.12); color: var(--green); }
-  .chip.orange { background: rgba(232,137,12,.12); color: var(--orange); }
-  .chip.gray { background: rgba(140,140,140,.15); color: var(--muted); }
-  .muted { color: var(--muted); font-size: 12px; }
-  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; background: var(--gray); }
-  .dot.run { background: var(--green); } .dot.stale { background: var(--orange); }
-  .dev { border-top: 1px solid var(--line); padding: 9px 4px; cursor: pointer; }
-  .dev:first-child { border-top: 0; }
-  .dev.sel { background: var(--blue-soft); box-shadow: inset 3px 0 var(--blue); }
-  .dev .id { font-weight: 600; }
-  .pending { color: var(--orange); font-size: 12px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px; }
-  .set { border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; display: flex; align-items: center; gap: 8px; }
-  .set.changed { border-color: var(--blue); background: var(--blue-soft); }
-  .set label { flex: 1; }
-  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
-  .seg button { border: 0; border-radius: 0; }
-  .seg button.on { background: var(--blue-soft); color: var(--blue); }
-  #toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: rgba(0,0,0,.8); color: #fff; padding: 8px 14px; border-radius: 8px; display: none; max-width: 90%; }
-  table { border-collapse: collapse; width: 100%; font-size: 13px; }
-  td { border-top: 1px solid var(--line); padding: 5px 4px; }
+  input[type=checkbox] { width: 18px; height: 18px; accent-color: var(--blue); margin: 0; }
   .hidden { display: none !important; }
+
+  /* 登录 */
+  .login { max-width: 460px; margin: 12vh auto 0; padding: 0 16px; }
+  .login .box { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 24px; display: flex; flex-direction: column; gap: 12px; }
+  .login h1 { margin: 0; font-size: 20px; }
+  .muted { color: var(--muted); font-size: 12px; }
+
+  /* 主页面：左边表格，右边抽屉 */
+  .app { display: flex; height: 100vh; overflow: hidden; }
+  .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  /* 顶部同方案 A（用户要求）：图标 + 标题 + 连接状态胶囊，下面四个数字格子、筛选胶囊和搜索 */
+  header { display: flex; align-items: center; gap: 16px; padding: 18px 24px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  header h1 { margin: 0; font-size: 20px; font-weight: 650; }
+  .logo { width: 36px; height: 36px; border-radius: 10px; background: var(--blue); color: #fff; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .conn { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 6px 12px; border-radius: 999px; background: color-mix(in srgb, currentColor 12%, transparent); }
+  .conn i { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+  .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; padding: 18px 24px 0; }
+  .stat { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px 18px; }
+  .stat div:first-child { font-size: 13px; color: var(--muted); }
+  .stat div:last-child { font-size: 30px; font-weight: 700; margin-top: 2px; }
+  .filters { display: flex; align-items: center; gap: 8px; padding: 16px 24px 0; flex-wrap: wrap; }
+  .chip { font-size: 13px; color: var(--soft); background: #1b1f27; border: 1px solid var(--line2); border-radius: 999px; padding: 0 16px; min-height: 36px; }
+  .chip.on { color: #fff; background: var(--blue); border-color: var(--blue); }
+  .search { display: flex; align-items: center; gap: 8px; background: var(--card); border: 1px solid var(--line2); border-radius: 10px; padding: 0 12px; height: 40px; width: 280px; max-width: 100%; color: var(--muted); }
+  .search input { background: transparent; border: 0; padding: 0; width: 100%; outline: none; }
+  .btn { color: var(--text); background: #1b1f27; border: 1px solid var(--line2); border-radius: 10px; padding: 0 14px; min-height: 40px; }
+  .btn.solid { border: 0; color: #fff; }
+  .btn.green { background: var(--green); } .btn.red { background: var(--red); } .btn.gray { background: var(--btn); border: 0; }
+  .btn.blue { background: var(--blue); border: 0; color: #fff; }
+  .toolbar { display: flex; align-items: center; gap: 8px; padding: 12px 24px; flex-wrap: wrap; }
+  .tablebox { flex: 1; overflow: auto; padding: 0 24px 24px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 720px; }
+  th { text-align: left; color: var(--muted); font-weight: 500; padding: 10px 8px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg); cursor: pointer; white-space: nowrap; }
+  td { padding: 10px 8px; border-bottom: 1px solid var(--row); vertical-align: top; }
+  tr.dev { cursor: pointer; }
+  tr.dev:hover { background: #151922; }
+  tr.dev.sel { background: var(--blue-bg); }
+  tr.grp td { background: #141821; color: var(--soft); font-size: 12px; padding: 8px; cursor: pointer; border-bottom: 1px solid var(--line); }
+  tr.grp b { color: var(--text); font-size: 13px; }
+  tr.ingrp td:nth-child(2) { padding-left: 22px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 8px; }
+  .dot.run { background: var(--green); } .dot.stale { background: var(--orange); }
+  .old { color: var(--orange); }
+  .pend { color: var(--orange); font-size: 12px; margin-top: 2px; }
+  .bans { margin-top: 18px; }
+  .bans summary { cursor: pointer; color: var(--soft); padding: 8px 0; }
+
+  /* 设置抽屉 */
+  aside { width: 420px; flex-shrink: 0; background: var(--panel); border-left: 1px solid var(--line2); display: flex; flex-direction: column; box-shadow: -16px 0 40px rgba(0,0,0,.35); }
+  aside .head { display: flex; align-items: center; padding: 16px 20px; border-bottom: 1px solid var(--line); }
+  aside .body { flex: 1; overflow: auto; padding: 16px 20px; display: flex; flex-direction: column; gap: 16px; }
+  aside .foot { padding: 14px 20px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; }
+  .x { color: var(--soft); background: transparent; border: 0; width: 40px; height: 40px; font-size: 22px; }
+  .tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+  .tile { font-size: 13px; color: var(--soft); background: var(--input); border: 1px solid var(--line2); border-radius: 10px; min-height: 44px; padding: 4px 6px; display: flex; align-items: center; justify-content: center; gap: 4px; flex-wrap: wrap; }
+  .tile.on { color: var(--blue-text); background: var(--blue-tile); border-color: var(--blue); }
+  .tile.changed { border-style: dashed; }
+  .tile input { width: 44px; padding: 3px 4px; text-align: center; }
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  .field .line { display: flex; align-items: center; gap: 6px; }
+  .seg { display: inline-flex; border: 1px solid var(--line2); border-radius: 10px; overflow: hidden; }
+  .seg button { color: var(--soft); background: transparent; border: 0; padding: 0 16px; min-height: 36px; }
+  .seg button + button { border-left: 1px solid var(--line2); }
+  .seg button.on { color: #fff; background: var(--blue); }
+  .rows { display: flex; flex-direction: column; gap: 2px; border-top: 1px solid var(--line); padding-top: 8px; }
+  .srow { display: flex; align-items: center; gap: 10px; min-height: 42px; font-size: 13px; border-radius: 8px; padding: 0 8px; }
+  .srow.changed { background: var(--blue-tile); }
+  .srow > span { flex: 1; }
+  .srow input[type=text] { width: 120px; }
+  .srow input[type=number] { width: 70px; }
+  .changed-input { border-color: var(--blue) !important; }
+
+  #toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: rgba(20,22,28,.95); border: 1px solid var(--line2); color: #fff; padding: 10px 16px; border-radius: 10px; display: none; max-width: 90%; z-index: 10; }
+
+  /* 手机：表格横向滚动，抽屉盖住整个屏幕 */
+  @media (max-width: 860px) {
+    header, .toolbar, .stats, .filters { padding-left: 16px; padding-right: 16px; }
+    .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .search { width: 100%; }
+    .tablebox { padding: 0 16px 24px; }
+    aside { position: fixed; inset: 0; width: auto; z-index: 5; }
+  }
 </style>
 </head>
 <body>
-<div class="wrap">
 
-  <!-- 登录：巴法云私钥只存在这个浏览器 -->
-  <div id="login" class="card hidden">
+<!-- 登录：巴法云私钥只存在这个浏览器 -->
+<div id="login" class="login hidden">
+  <div class="box">
     <h1>XP 设备管理</h1>
-    <p class="muted">填巴法云私钥（同 local.properties 的 xp.bemfa.key）。只存在这个浏览器里，页面文件里没有。</p>
-    <div class="row"><input id="key" type="password" class="grow" placeholder="巴法云私钥"></div>
-    <div class="row" style="margin-top:8px">
-      <span class="muted">报告主题</span><input id="stateTopic" type="text" value="xptest" style="width:110px">
-      <span class="muted">命令主题</span><input id="cmdTopic" type="text" value="xptest2" style="width:110px">
+    <p class="muted" style="margin:0">填巴法云私钥（同 local.properties 的 xp.bemfa.key）。只存在这个浏览器里，页面文件里没有。也可以用书签链接 …/#key=私钥 直接进。</p>
+    <label class="field"><span class="muted">巴法云私钥</span><input id="key" type="password"></label>
+    <div class="line" style="display:flex;gap:8px">
+      <label class="field" style="flex:1"><span class="muted">报告主题</span><input id="stateTopic" type="text" value="xptest"></label>
+      <label class="field" style="flex:1"><span class="muted">命令主题</span><input id="cmdTopic" type="text" value="xptest2"></label>
     </div>
-    <div class="row" style="margin-top:10px"><button class="primary" onclick="login()">进入</button><span id="loginErr" class="muted"></span></div>
+    <button class="btn blue" onclick="login()">进入</button>
+    <span id="loginErr" class="muted"></span>
+  </div>
+</div>
+
+<div id="app" class="app hidden">
+  <div class="main">
+    <header>
+      <div class="logo" aria-hidden="true">XP</div>
+      <h1>设备管理</h1>
+      <span style="flex:1"></span>
+      <span id="conn" class="conn" style="color:var(--muted)"><i></i><span>未连接</span></span>
+      <button class="btn" onclick="refresh()">↻ 刷新</button>
+      <button class="btn" onclick="logout()" title="忘记这个浏览器里的私钥">退出</button>
+    </header>
+    <div class="stats">
+      <div class="stat"><div>设备</div><div id="sAll">0</div></div>
+      <div class="stat"><div>运行中</div><div id="sRun" style="color:var(--green)">0</div></div>
+      <div class="stat"><div>可能已离线</div><div id="sStale" style="color:var(--orange)">0</div></div>
+      <div class="stat"><div>10 分钟求援</div><div id="sReq">0</div></div>
+    </div>
+    <div class="filters">
+      <button class="chip" data-f="all"></button>
+      <button class="chip" data-f="run"></button>
+      <button class="chip" data-f="stale"></button>
+      <button class="chip" data-f="old"></button>
+      <button class="chip" id="groupBtn" title="账号范围一样的设备放在一起">按范围分组</button>
+      <span style="flex:1"></span>
+      <label class="search">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg>
+        <input id="search" type="text" placeholder="搜索设备号 / 账号" aria-label="搜索设备号或账号">
+      </label>
+    </div>
+    <div class="toolbar">
+      <button class="btn solid green cmd" onclick="command('start')">▶ 开始</button>
+      <button class="btn solid red cmd" onclick="command('stop')">■ 停止</button>
+      <button class="btn gray cmd" onclick="command('restart')">↻ 重启</button>
+      <button class="btn gray cmd" id="setBtn" onclick="togglePush()">⚙ 设置</button>
+      <span id="selCount" class="muted" style="margin-left:6px"></span>
+    </div>
+    <div class="tablebox">
+      <table>
+        <thead><tr>
+          <th style="width:30px" onclick="event.stopPropagation()"><input type="checkbox" id="selAll" aria-label="全选" onclick="toggleAll()"></th>
+          <th data-sort="id">设备</th>
+          <th data-sort="current">当前</th>
+          <th data-sort="from">范围</th>
+          <th data-sort="army">军队</th>
+          <th data-sort="requests">10 分钟求援</th>
+          <th data-sort="version">版本</th>
+          <th data-sort="updated">更新</th>
+        </tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <details class="bans">
+        <summary id="banTitle">封号</summary>
+        <table style="min-width:0"><tbody id="bans"></tbody></table>
+      </details>
+    </div>
   </div>
 
-  <div id="main" class="hidden">
-    <div class="row">
-      <h1 class="grow">所有设备</h1>
-      <span id="conn" class="chip gray">未连接</span>
-      <button onclick="refresh()">↻ 刷新</button>
-      <button onclick="logout()">退出</button>
-    </div>
-    <div id="summary" class="row" style="margin-top:8px"></div>
-
-    <div class="card">
-      <div class="row">
-        <button onclick="toggleAll()" id="selAll">全选</button>
-        <span id="selCount" class="muted"></span>
-        <span class="grow"></span>
-        <button class="cmd" onclick="command('start')">开始</button>
-        <button class="cmd danger" onclick="command('stop')">停止</button>
-        <button class="cmd" onclick="command('restart')">重启</button>
-        <button class="cmd" id="pushBtn" onclick="togglePush()">设置</button>
-      </div>
-
-      <!-- 推送设置：显示勾上的第一台设备报告的值，只发改过的 -->
-      <div id="push" class="hidden" style="margin-top:12px">
+  <!-- 设置抽屉：显示勾上的第一台设备报告的值，只发改过的 -->
+  <aside id="push" class="hidden" aria-label="设置">
+    <div class="head">
+      <div style="flex:1">
+        <div style="font-size:17px;font-weight:650">设置</div>
         <div id="pushFrom" class="muted"></div>
-        <div class="row" style="margin-top:8px">
-          <span>账号</span><input id="pFrom" type="number"> - <input id="pTo" type="number">
-          <span style="margin-left:12px">账号记忆</span><input id="pMemory" type="number" placeholder="空 = 从头">
-        </div>
-        <div class="row" style="margin-top:8px">
-          <span>军队链接：</span>
-          <span class="seg" id="pArmy">
-            <button data-v="off">关</button><button data-v="basic">基础</button><button data-v="advanced">高级</button>
-          </span>
-        </div>
-        <div id="pSettings" class="grid" style="margin-top:10px"></div>
-        <div class="row" style="margin-top:10px">
-          <label><input type="checkbox" id="pRestart" checked> 在跑的设备发完重启（脚本重新开始时才读设置）</label>
-          <span class="grow"></span>
-          <button class="primary" onclick="sendSettings()">发给勾上的设备</button>
+      </div>
+      <button class="x" aria-label="关闭" onclick="togglePush()">×</button>
+    </div>
+    <div class="body">
+      <div id="pTiles" class="tiles"></div>
+      <div class="field">
+        <span class="muted">账号范围 · 存档文件夹</span>
+        <div class="line">
+          <input id="pFrom" type="number" aria-label="起始号" style="width:84px"> –
+          <input id="pTo" type="number" aria-label="结束号" style="width:84px">
+          <span class="muted" style="margin-left:4px">/sdcard/</span>
+          <input id="pDir" type="text" aria-label="存档文件夹" style="flex:1">
         </div>
       </div>
-
-      <div id="devices" style="margin-top:10px"></div>
+      <div class="field">
+        <span class="muted">账号记忆（下次从这个号开始；空 = 从范围第一个号）</span>
+        <div class="line"><input id="pMemory" type="number" style="width:120px"></div>
+      </div>
+      <div class="line" style="display:flex;align-items:center;gap:10px">
+        <span style="font-size:13px;color:var(--soft);width:64px">军队链接</span>
+        <span class="seg" id="pArmy">
+          <button data-v="off">关</button><button data-v="basic">基础</button><button data-v="advanced">高级</button>
+        </span>
+      </div>
+      <div id="pRows" class="rows"></div>
     </div>
-
-    <div class="card">
-      <div class="row"><b class="grow">封号</b><span id="banCount" class="muted"></span></div>
-      <table id="bans"></table>
+    <div class="foot">
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--soft)"><input type="checkbox" id="pRestart" checked>在跑的设备发完重启（脚本重新开始时才读设置）</label>
+      <button id="sendBtn" class="btn blue" style="min-height:48px;font-size:15px;font-weight:600" onclick="sendSettings()">发给勾上的设备</button>
     </div>
-  </div>
+  </aside>
 </div>
 <div id="toast"></div>
 
@@ -136,19 +235,27 @@ const REQUEST_WINDOW_MS = 10 * 60_000;
 const ASK_WAIT_MS = 3_000;
 const CMD_NAMES = { start: '开始', stop: '停止', restart: '重启' };
 const ARMY_NAMES = { off: '关', basic: '基础', advanced: '高级' };
-// 推送设置里的名字（同 assets/ui/coc_request.lua）；账号范围、存档文件夹以外不认识的 key 照 key 显示。
-const LABELS = {
-  account_memory: '账号记忆', reverse: '反序运行', device_slow: '设备卡顿',
-  auto_off: '轮后关', auto_off_laps: '轮后关的轮数', auto_off_army_link: '轮后关：军队链接（基础 / 高级）',
-  data_dir: '存档文件夹 /sdcard/', retry_empty_load: '空援重载',
-  use_request_message: '请求内容', request_message: '请求内容的字',
-  join_clan: '进部落', clan_tag: '部落标签', clan_code: '暗号',
-  leave_clan: '求援后退部落', leave_clan_min_ms: '退部落最少（毫秒）', leave_clan_max_ms: '退部落最多（毫秒）',
-  wait_after_last: '末号等', wait_after_last_s: '末号等（秒）',
-  wait_cooldown: '等求援冷却', cooldown_minutes: '等求援冷却 ≤（分）',
-};
-// 这些不在设置格子里（上面单独改）。
-const NOT_IN_GRID = new Set(['account_from', 'account_to']);
+
+// 设置抽屉的样子（同 assets/ui/coc_request.lua 的表单）：格子（勾选框 + 格子里的数字）和一行一项。
+// 设备报告里有、这里没写的 key 放在最后照 key 显示。
+const TILES = [
+  { key: 'account_memory', label: '账号记忆' },
+  { key: 'reverse', label: '反序运行' },
+  { key: 'device_slow', label: '设备卡顿' },
+  { key: 'auto_off', num: 'auto_off_laps', label: '{n} 轮后关' },
+  { key: 'wait_after_last', num: 'wait_after_last_s', label: '末号等 {n} 秒' },
+  { key: 'wait_cooldown', num: 'cooldown_minutes', label: '等冷却 ≤ {n} 分' },
+];
+const ROWS = [
+  { key: 'retry_empty_load', label: '空援重载' },
+  { key: 'use_request_message', label: '请求内容', text: 'request_message' },
+  { key: 'join_clan', label: '进部落 标签', text: 'clan_tag' },
+  { label: '暗号', text: 'clan_code' },
+  { key: 'leave_clan', label: '求援后退部落（毫秒）', nums: ['leave_clan_min_ms', 'leave_clan_max_ms'] },
+  { key: 'auto_off_army_link', label: '轮后关：军队链接' },
+];
+// 不在抽屉里当设置发的（范围用 set_from / set_to，上面单独改）。
+const SEPARATE = new Set(['account_from', 'account_to', 'data_dir']);
 
 // ---- 状态 ----
 let client = null;
@@ -158,8 +265,10 @@ let cmds = {};          // 设备号 → 发出的改动（还没用上的才算
 let ask = 0;            // 命令表里的 ask
 let gotCmds = false;    // 收到过保留的命令表（发之前要先有它，不然会把别人的盖掉）
 let selected = new Set(load('xp_dash_sel') || []);
+let sortKey = load('xp_dash_sort') || 'from';
 let pushOpen = false;
-let pushBase = null;    // 推送设置打开时的值（比对改过没有）
+let base = null;        // 抽屉打开时的值
+let draft = null;       // 抽屉里改成的值（key → 值）
 
 function load(k) { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } }
 function save(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
@@ -173,6 +282,7 @@ function ago(ms) {
   if (s < 86400) return Math.floor(s / 3600) + ' 小时前';
   return Math.floor(s / 86400) + ' 天前';
 }
+function verNum(v) { return Number(String(v || '').split('.')[1] || 0); }
 
 // ---- 登录 / 连接 ----
 function login() {
@@ -189,28 +299,28 @@ function logout() {
 }
 function start() {
   $('login').classList.add('hidden');
-  $('main').classList.remove('hidden');
+  $('app').classList.remove('hidden');
   render();
-  setConn('连接中…', 'gray');
+  setConn('连接中…', 'var(--muted)');
   // 巴法云的客户端 id 只能是私钥（所有设备同一个，几个连接可以同时连着）。QoS 1 它不回 PUBACK，所以发 QoS 0。
   client = mqtt.connect('wss://bemfa.com:9504/wss', { clientId: cfg.key, clean: true, reconnectPeriod: 5000, connectTimeout: 10000 });
   client.on('connect', () => {
-    setConn('已连接', 'green');
+    setConn('已连接', 'var(--green)');
     gotCmds = false;
     client.subscribe([cfg.cmd, cfg.state], { qos: 0 });
     // 等保留的命令表最多 2 秒，再问所有设备报告一次。
     setTimeout(() => { gotCmds = true; refresh(); }, 2000);
   });
-  client.on('reconnect', () => setConn('重连中…', 'orange'));
-  client.on('close', () => setConn('已断开', 'gray'));
-  client.on('error', e => { setConn('出错', 'orange'); toast('巴法云：' + (e && e.message || e)); });
+  client.on('reconnect', () => setConn('重连中…', 'var(--orange)'));
+  client.on('close', () => setConn('已断开', 'var(--muted)'));
+  client.on('error', e => { setConn('出错', 'var(--orange)'); toast('巴法云：' + (e && e.message || e)); });
   client.on('message', (topic, payload) => {
     let msg; try { msg = JSON.parse(new TextDecoder().decode(payload)); } catch { return; }
     if (topic === cfg.cmd) onCmds(msg);
     else if (topic === cfg.state) onState(msg);
   });
 }
-function setConn(text, color) { const c = $('conn'); c.textContent = text; c.className = 'chip ' + color; }
+function setConn(text, color) { const c = $('conn'); c.style.color = color; c.lastElementChild.textContent = text; }
 
 function onCmds(root) {
   if (!root || typeof root !== 'object') return;
@@ -278,168 +388,303 @@ setInterval(() => {
 }, RESEND_MS);
 setInterval(render, 30_000); // “几分钟前”跟着走
 
-// ---- 操作 ----
+// ---- 选择、命令 ----
 function selectedIds() { return [...selected].filter(id => states[id]); }
 function command(name) {
   const ids = selectedIds();
   if (request(ids, r => { r.command = name; })) toast(`已发 ${CMD_NAMES[name]} 给 ${ids.length} 台`);
 }
+// 全选只管表格里看得到的（筛选 / 搜索后的）设备。
 function toggleAll() {
-  const ids = Object.keys(states);
-  if (ids.every(id => selected.has(id))) selected.clear(); else ids.forEach(id => selected.add(id));
-  save('xp_dash_sel', [...selected]);
-  if (pushOpen) openPush();
-  render();
+  const ids = visibleIds();
+  if (ids.length && ids.every(id => selected.has(id))) ids.forEach(id => selected.delete(id)); else ids.forEach(id => selected.add(id));
+  selChanged();
 }
+// 筛选胶囊（全部 / 运行中 / 离线 / 版本旧）和搜索（设备号、当前号、账号范围）对上的设备。
+let filter = 'all';
+function visibleIds() {
+  const now = Date.now();
+  const all = Object.keys(states);
+  const newest = all.map(id => states[id].version).filter(Boolean).sort((a, b) => verNum(b) - verNum(a))[0];
+  const q = $('search').value.trim().toLowerCase();
+  return all.filter(id => {
+    const s = states[id];
+    const isStale = !!s.updated && now - s.updated > STALE_MS;
+    if (filter === 'run' && !(s.running && !isStale)) return false;
+    if (filter === 'stale' && !isStale) return false;
+    if (filter === 'old' && !(newest && s.version && s.version !== newest)) return false;
+    if (!q) return true;
+    const n = Number(q);
+    return id.toLowerCase().includes(q) || String(s.current ?? '').includes(q) ||
+      (Number.isFinite(n) && s.from != null && s.to != null && n >= s.from && n <= s.to);
+  });
+}
+document.querySelectorAll('.chip[data-f]').forEach(c => c.addEventListener('click', () => { filter = c.dataset.f; render(); }));
+let groupByRange = load('xp_dash_group') ?? true;
+$('groupBtn').addEventListener('click', () => { groupByRange = !groupByRange; save('xp_dash_group', groupByRange); render(); });
+$('search').addEventListener('input', render);
 function toggleDevice(id) {
   if (selected.has(id)) selected.delete(id); else selected.add(id);
+  selChanged();
+}
+function selChanged() {
   save('xp_dash_sel', [...selected]);
-  if (pushOpen) openPush();
+  if (pushOpen) { if (selectedIds().length) openPush(); else closePush(); }
   render();
 }
+document.querySelectorAll('th[data-sort]').forEach(th => th.addEventListener('click', () => {
+  sortKey = th.dataset.sort; save('xp_dash_sort', sortKey); render();
+}));
 
-// ---- 推送设置 ----
+// ---- 设置抽屉 ----
 function togglePush() {
-  if (pushOpen) { pushOpen = false; $('push').classList.add('hidden'); render(); return; }
+  if (pushOpen) { closePush(); return; }
   if (!selectedIds().length) { toast('先勾上要管理的设备'); return; }
   pushOpen = true;
   openPush();
   render();
 }
+function closePush() { pushOpen = false; $('push').classList.add('hidden'); render(); }
 function openPush() {
   const ids = selectedIds();
-  if (!ids.length) { pushOpen = false; $('push').classList.add('hidden'); return; }
   const s = states[ids[0]];
-  const settings = Object.assign({}, s.settings || {});
   const armies = new Set(ids.map(id => states[id].army || 'off'));
-  pushBase = {
-    from: s.from ?? '', to: s.to ?? '', memory: s.current ?? '',
+  const settings = Object.assign({}, s.settings || {});
+  base = {
+    from: s.from ?? '', to: s.to ?? '', memory: s.current ?? '', dir: settings.data_dir ?? '',
     army: armies.size === 1 ? [...armies][0] : null, settings,
   };
-  $('pushFrom').textContent = `显示的是 ${s.id} 的设置` + (ids.length > 1 ? `（勾了 ${ids.length} 台，只发改过的项）` : '');
-  $('pFrom').value = pushBase.from; $('pTo').value = pushBase.to; $('pMemory').value = pushBase.memory;
-  setArmy(pushBase.army);
-  const grid = $('pSettings');
-  grid.innerHTML = '';
-  for (const [key, value] of Object.entries(settings)) {
-    if (NOT_IN_GRID.has(key)) continue;
-    const box = document.createElement('div');
-    box.className = 'set';
-    box.dataset.key = key;
-    const label = `<label>${esc(LABELS[key] || key)}</label>`;
-    if (typeof value === 'boolean') {
-      box.innerHTML = label + `<input type="checkbox" ${value ? 'checked' : ''}>`;
-    } else if (typeof value === 'number' || (value === '' && /_(ms|s|laps|minutes)$/.test(key))) {
-      box.innerHTML = label + `<input type="number" value="${esc(value)}">`;
-    } else {
-      box.innerHTML = label + `<input type="text" value="${esc(value)}" style="width:120px">`;
-    }
-    box.querySelector('input').addEventListener('input', () => box.classList.toggle('changed', changedValue(box) !== undefined));
-    grid.appendChild(box);
-  }
+  draft = Object.assign({}, settings);
+  $('pushFrom').dataset.from = s.id;
+  $('pFrom').value = base.from; $('pTo').value = base.to; $('pMemory').value = base.memory; $('pDir').value = base.dir;
+  setArmy(base.army);
+  drawSettings();
   $('push').classList.remove('hidden');
+  updateSend();
 }
 function setArmy(v) {
   for (const b of $('pArmy').children) b.classList.toggle('on', b.dataset.v === v);
   $('pArmy').dataset.v = v || '';
+  updateSend();
 }
-$('pArmy') && $('pArmy').addEventListener('click', e => { if (e.target.dataset.v) setArmy(e.target.dataset.v); });
-// 格子改过时返回新值（数字框空着为 ""，同配置文件），没改为 undefined。
-function changedValue(box) {
-  const key = box.dataset.key, input = box.querySelector('input'), old = pushBase.settings[key];
-  let v;
-  if (input.type === 'checkbox') v = input.checked;
-  else if (input.type === 'number') v = input.value.trim() === '' ? '' : Number(input.value);
-  else v = input.value;
-  return v === old ? undefined : v;
+$('pArmy').addEventListener('click', e => { if (e.target.dataset.v) setArmy(e.target.dataset.v); });
+['pFrom', 'pTo', 'pMemory', 'pDir'].forEach(id => $(id).addEventListener('input', updateSend));
+
+const has = k => k && Object.prototype.hasOwnProperty.call(base.settings, k);
+const changed = k => has(k) && draft[k] !== base.settings[k];
+// 数字框的值（空着为 ""，同配置文件）。
+function numVal(input) { return input.value.trim() === '' ? '' : Number(input.value); }
+function numInput(key) {
+  const i = document.createElement('input');
+  i.type = 'number'; i.value = draft[key] ?? '';
+  if (changed(key)) i.classList.add('changed-input');
+  i.addEventListener('click', e => e.stopPropagation());
+  i.addEventListener('input', () => { draft[key] = numVal(i); i.classList.toggle('changed-input', changed(key)); updateSend(); });
+  return i;
+}
+function textInput(key) {
+  const i = document.createElement('input');
+  i.type = 'text'; i.value = draft[key] ?? '';
+  if (changed(key)) i.classList.add('changed-input');
+  i.addEventListener('click', e => e.stopPropagation());
+  i.addEventListener('input', () => { draft[key] = i.value; i.classList.toggle('changed-input', changed(key)); updateSend(); });
+  return i;
+}
+function drawSettings() {
+  const used = new Set();
+  // 格子：点格子 = 勾上 / 取消；数字在格子里直接改。
+  const tiles = $('pTiles'); tiles.innerHTML = '';
+  for (const t of TILES) {
+    if (!has(t.key)) continue;
+    used.add(t.key); if (t.num) used.add(t.num);
+    const el = document.createElement('button');
+    el.type = 'button';
+    el.className = 'tile' + (draft[t.key] ? ' on' : '') + (changed(t.key) || changed(t.num) ? ' changed' : '');
+    if (t.num && has(t.num)) {
+      const [pre, post] = t.label.split('{n}');
+      if (pre) el.append(pre.trim());
+      el.append(numInput(t.num));
+      if (post) el.append(post.trim());
+    } else el.append(t.label);
+    el.addEventListener('click', () => { draft[t.key] = !draft[t.key]; drawSettings(); updateSend(); });
+    tiles.append(el);
+  }
+  // 一行一项：勾选框 + 字 + 后面的框。
+  const rows = $('pRows'); rows.innerHTML = '';
+  const addRow = (label, key, inputs, extraKeys) => {
+    const row = document.createElement('label');
+    row.className = 'srow' + ([key, ...extraKeys].some(changed) ? ' changed' : '');
+    if (key) {
+      const c = document.createElement('input');
+      c.type = 'checkbox'; c.checked = !!draft[key];
+      c.addEventListener('change', () => { draft[key] = c.checked; row.classList.toggle('changed', [key, ...extraKeys].some(changed)); updateSend(); });
+      row.append(c);
+    }
+    const s = document.createElement('span'); s.textContent = label; row.append(s);
+    inputs.forEach((i, n) => { if (n) row.append('–'); row.append(i); });
+    rows.append(row);
+  };
+  for (const r of ROWS) {
+    const extra = [r.text, ...(r.nums || [])].filter(has);
+    if (!has(r.key) && !extra.length) continue;
+    [r.key, ...extra].forEach(k => k && used.add(k));
+    const inputs = [];
+    if (r.text && has(r.text)) inputs.push(textInput(r.text));
+    for (const n of r.nums || []) if (has(n)) inputs.push(numInput(n));
+    addRow(r.label, has(r.key) ? r.key : null, inputs, extra);
+  }
+  // 设备报告了、上面没写的（XP 以后加的设置）：照 key 一行。
+  for (const [k, v] of Object.entries(base.settings)) {
+    if (used.has(k) || SEPARATE.has(k)) continue;
+    if (typeof v === 'boolean') addRow(k, k, [], []);
+    else addRow(k, null, [typeof v === 'number' ? numInput(k) : textInput(k)], [k]);
+  }
+}
+// 要发的改动；没有改动为 null。
+function collect() {
+  const set = {};
+  for (const k of Object.keys(base.settings)) if (!SEPARATE.has(k) && changed(k)) set[k] = draft[k];
+  const dir = $('pDir').value;
+  if ('data_dir' in base.settings && dir !== base.dir) set.data_dir = dir;
+  const from = $('pFrom').value.trim(), to = $('pTo').value.trim(), memory = $('pMemory').value.trim();
+  const range = String(from) !== String(base.from) || String(to) !== String(base.to);
+  const mem = String(memory) !== String(base.memory);
+  const army = $('pArmy').dataset.v;
+  const armyChanged = !!army && army !== base.army;
+  const n = Object.keys(set).length + (range ? 1 : 0) + (mem ? 1 : 0) + (armyChanged ? 1 : 0);
+  return { set, from, to, memory, range, mem, army, armyChanged, n };
+}
+function updateSend() {
+  if (!base) return;
+  const n = collect().n, ids = selectedIds().length;
+  $('pushFrom').textContent = `显示的是 ${$('pushFrom').dataset.from} 的 · 发给勾上的 ${ids} 台（只发改过的项）`;
+  $('sendBtn').textContent = n ? `发给勾上的 ${ids} 台（改了 ${n} 项）` : `发给勾上的 ${ids} 台`;
+  $('sendBtn').disabled = !n;
 }
 function sendSettings() {
   const ids = selectedIds();
-  const set = {};
-  for (const box of $('pSettings').children) { const v = changedValue(box); if (v !== undefined) set[box.dataset.key] = v; }
-  const from = $('pFrom').value.trim(), to = $('pTo').value.trim(), memory = $('pMemory').value.trim();
-  const rangeChanged = String(from) !== String(pushBase.from) || String(to) !== String(pushBase.to);
-  if (rangeChanged && (!/^\d+$/.test(from) || !/^\d+$/.test(to) || Number(from) > Number(to))) {
+  const c = collect();
+  if (!c.n) { toast('没有改动'); return; }
+  if (c.range && (!/^\d+$/.test(c.from) || !/^\d+$/.test(c.to) || Number(c.from) > Number(c.to))) {
     toast('账号范围不对（要填数字，起始号不能比结束号大）'); return;
   }
-  const memoryChanged = String(memory) !== String(pushBase.memory);
-  if (memoryChanged && memory !== '' && !/^\d+$/.test(memory)) { toast('账号记忆要填数字'); return; }
-  const army = $('pArmy').dataset.v;
-  const armyChanged = army && army !== pushBase.army;
-  const n = Object.keys(set).length + (rangeChanged ? 1 : 0) + (memoryChanged ? 1 : 0) + (armyChanged ? 1 : 0);
-  if (!n) { toast('没有改动'); return; }
+  if (c.mem && c.memory !== '' && !/^\d+$/.test(c.memory)) { toast('账号记忆要填数字'); return; }
   const restart = $('pRestart').checked;
+  const hasSet = Object.keys(c.set).length > 0;
   const ok = request(ids, (r, id) => {
-    if (Object.keys(set).length) r.set_settings = Object.assign({}, r.set_settings || {}, set);
-    if (rangeChanged) { r.set_from = Number(from); r.set_to = Number(to); }
-    if (memoryChanged) r.set_memory = memory;  // "" = 清掉，从账号范围的第一个号跑
-    if (armyChanged) r.set_army = army;
-    if (restart && states[id].running && Object.keys(set).length) r.command = 'restart';
+    if (hasSet) r.set_settings = Object.assign({}, r.set_settings || {}, c.set);
+    if (c.range) { r.set_from = Number(c.from); r.set_to = Number(c.to); }
+    if (c.mem) r.set_memory = c.memory;  // "" = 清掉，从账号范围的第一个号跑
+    if (c.armyChanged) r.set_army = c.army;
+    if (restart && states[id].running && hasSet) r.command = 'restart';
   });
-  if (ok) { toast(`已发 ${n} 项给 ${ids.length} 台`); openPush(); }
+  if (ok) { toast(`已发 ${c.n} 项给 ${ids.length} 台`); openPush(); }
 }
 
-// ---- 画页面 ----
+// ---- 画表格 ----
 function render() {
   const now = Date.now();
-  const ids = Object.keys(states).sort((a, b) => ((states[a].from ?? 1e15) - (states[b].from ?? 1e15)) || a.localeCompare(b));
-  const versions = ids.map(id => states[id].version).filter(Boolean);
-  const newest = versions.sort((a, b) => Number(b.split('.')[1] || 0) - Number(a.split('.')[1] || 0))[0];
-  let running = 0, stale = 0, old = 0;
+  const all = Object.keys(states);
+  const newest = all.map(id => states[id].version).filter(Boolean).sort((a, b) => verNum(b) - verNum(a))[0];
+  const reqs = s => (s.requests || []).filter(t => now - t < REQUEST_WINDOW_MS).length;
+  const sorters = {
+    id: (a, b) => a.id.localeCompare(b.id),
+    current: (a, b) => (a.current ?? 0) - (b.current ?? 0),
+    from: (a, b) => ((a.from ?? 1e15) - (b.from ?? 1e15)) || a.id.localeCompare(b.id),
+    army: (a, b) => String(a.army).localeCompare(String(b.army)),
+    requests: (a, b) => reqs(b) - reqs(a),
+    version: (a, b) => verNum(a.version) - verNum(b.version),
+    updated: (a, b) => (b.updated || 0) - (a.updated || 0),
+  };
+  const flags = s => {
+    const isStale = !!s.updated && now - s.updated > STALE_MS;
+    return { isStale, isRun: !!s.running && !isStale, oldVer: !!(newest && s.version && s.version !== newest) };
+  };
+  // 数字格子、筛选胶囊按所有设备算；表格只列筛选 + 搜索对上的。
+  let running = 0, stale = 0, old = 0, requests = 0;
   const bans = {};
-  const rows = ids.map(id => {
-    const s = states[id];
-    const isStale = s.updated && now - s.updated > STALE_MS;
-    const isRun = s.running && !isStale;
-    if (isRun) running++;
-    if (isStale) stale++;
-    const oldVer = newest && s.version && s.version !== newest;
-    if (oldVer) old++;
+  for (const id of all) {
+    const s = states[id], f = flags(s);
+    if (f.isRun) running++;
+    if (f.isStale) stale++;
+    if (f.oldVer) old++;
+    requests += reqs(s);
     for (const [k, b] of Object.entries(s.bans || {})) if (!bans[k] || (b.time || 0) > (bans[k].time || 0)) bans[k] = b;
+  }
+  const q = $('search').value.trim().toLowerCase();
+  const list = visibleIds().map(id => states[id]).sort(sorters[sortKey] || sorters.from);
+  const html = list.map(s => {
+    const id = s.id;
+    const { isStale, isRun, oldVer } = flags(s);
     const p = pending(id);
-    const reqs = (s.requests || []).filter(t => now - t < REQUEST_WINDOW_MS).length;
     const notes = [];
     if (p) {
       if (p.command) notes.push('待执行：' + (CMD_NAMES[p.command] || p.command));
-      if (p.set_from) notes.push(`待生效范围：${p.set_from}–${p.set_to}`);
-      if (p.set_army) notes.push('待生效军队：' + ARMY_NAMES[p.set_army]);
+      if (p.set_from) notes.push(`待生效范围 ${p.set_from}–${p.set_to}`);
+      if (p.set_army) notes.push('待生效军队 ' + ARMY_NAMES[p.set_army]);
       if (p.set_settings) notes.push(`待生效设置 ${Object.keys(p.set_settings).length} 项`);
-      if ('set_memory' in p) notes.push('待生效账号记忆：' + (p.set_memory || '清空'));
+      if ('set_memory' in p) notes.push('待生效账号记忆 ' + (p.set_memory || '清空'));
     }
-    return `<div class="dev ${selected.has(id) ? 'sel' : ''}" onclick="toggleDevice('${esc(id)}')">
-      <div class="row">
-        <input type="checkbox" ${selected.has(id) ? 'checked' : ''} onclick="event.stopPropagation(); toggleDevice('${esc(id)}')">
-        <span class="dot ${isRun ? 'run' : isStale ? 'stale' : ''}"></span>
-        <span class="id">${esc(id)}</span>
-        <span class="grow"></span>
-        <b>${esc(s.current ?? '')}</b>
-        <span class="muted">· ${s.updated ? ago(s.updated) : '?'} ·</span>
-        <span class="${oldVer ? 'pending' : 'muted'}">v${esc(s.version || '?')}</span>
-      </div>
-      <div class="row muted" style="margin-left:26px">
-        <span>账号 ${esc(s.from ?? '?')}–${esc(s.to ?? '?')}</span>
-        <span>· 10 分钟求援 ${reqs} 次</span>
-        <span class="grow"></span>
-        <span class="chip">军队 ${esc(ARMY_NAMES[s.army] || '?')}</span>
-      </div>
-      ${notes.length ? `<div class="pending" style="margin-left:26px">${esc(notes.join(' · '))}</div>` : ''}
-    </div>`;
+    const sel = selected.has(id);
+    return `<tr class="dev ${sel ? 'sel' : ''}" data-id="${esc(id)}">
+      <td><input type="checkbox" ${sel ? 'checked' : ''} aria-label="选择 ${esc(id)}"></td>
+      <td><span class="dot ${isRun ? 'run' : isStale ? 'stale' : ''}" title="${isRun ? '运行中' : isStale ? '可能已离线' : '未运行'}"></span><b>${esc(id)}</b>
+        ${notes.length ? `<div class="pend">${esc(notes.join(' · '))}</div>` : ''}</td>
+      <td><b>${esc(s.current ?? '')}</b></td>
+      <td style="color:var(--soft)">${esc(s.from ?? '?')}–${esc(s.to ?? '?')}</td>
+      <td style="color:var(--soft)">${esc(ARMY_NAMES[s.army] || '?')}</td>
+      <td style="color:var(--soft)">${reqs(s)}</td>
+      <td class="${oldVer ? 'old' : ''}">${esc(s.version || '?')}</td>
+      <td style="color:${isStale ? 'var(--orange)' : 'var(--muted)'}">${s.updated ? ago(s.updated) : '?'}</td>
+    </tr>`;
   });
-  $('devices').innerHTML = rows.join('') || '<p class="muted">还没有设备报告。点 ↻ 刷新 让连着的设备报告一次。</p>';
-  const chips = [`<span class="chip">${ids.length} 台</span>`, `<span class="chip green">运行中 ${running}</span>`];
-  if (stale) chips.push(`<span class="chip orange">可能已离线 ${stale}</span>`);
-  if (old) chips.push(`<span class="chip orange">${old} 台版本旧</span>`);
-  chips.push(`<span class="chip gray">封号 ${Object.keys(bans).length}</span>`);
-  $('summary').innerHTML = chips.join('');
-  const sel = selectedIds().length;
-  $('selCount').textContent = sel ? `已选 ${sel} 台` : '';
-  $('selAll').textContent = ids.length && ids.every(id => selected.has(id)) ? '取消全选' : '全选';
-  document.querySelectorAll('button.cmd').forEach(b => b.disabled = !sel && b.id !== 'pushBtn');
-  $('pushBtn').classList.toggle('primary', pushOpen);
+  // 按范围分组（2026-10-30 用户要求）：账号范围一样的放在一起，上面一行“账号 A–B · N 台”，点它勾上 / 取消这一组；
+  // 范围只有一台的照常一行。
+  let out = html;
+  if (groupByRange) {
+    const groups = new Map();
+    list.forEach((s, i) => {
+      const key = `${s.from ?? '?'}–${s.to ?? '?'}`;
+      if (!groups.has(key)) groups.set(key, { from: s.from ?? 1e15, items: [] });
+      groups.get(key).items.push({ s, row: html[i] });
+    });
+    out = [];
+    [...groups.entries()].sort((a, b) => a[1].from - b[1].from).forEach(([key, g]) => {
+      if (g.items.length < 2) { out.push(g.items[0].row); return; }
+      const ids = g.items.map(x => x.s.id);
+      const allSel = ids.every(id => selected.has(id));
+      const run = g.items.filter(x => flags(x.s).isRun).length;
+      out.push(`<tr class="grp" data-ids="${esc(ids.join(','))}"><td><input type="checkbox" ${allSel ? 'checked' : ''} aria-label="选择这一组"></td>
+        <td colspan="7"><b>账号 ${esc(key)}</b> · ${ids.length} 台 · 运行中 ${run}</td></tr>`);
+      g.items.forEach(x => out.push(x.row.replace('<tr class="dev', '<tr class="ingrp dev')));
+    });
+  }
+  $('rows').innerHTML = out.join('') || `<tr><td colspan="8" class="muted" style="padding:24px 8px">${
+    all.length ? '没有对上筛选 / 搜索的设备' : '还没有设备报告。点 ↻ 刷新 让连着的设备报告一次。'}</td></tr>`;
+  document.querySelectorAll('tr.grp').forEach(tr => tr.addEventListener('click', () => {
+    const ids = tr.dataset.ids.split(',');
+    if (ids.every(id => selected.has(id))) ids.forEach(id => selected.delete(id)); else ids.forEach(id => selected.add(id));
+    selChanged();
+  }));
+  $('groupBtn').classList.toggle('on', groupByRange);
+  $('sAll').textContent = all.length; $('sRun').textContent = running; $('sStale').textContent = stale; $('sReq').textContent = requests;
+  const chipText = { all: `全部 ${all.length}`, run: `运行中 ${running}`, stale: `离线 ${stale}`, old: `版本旧 ${old}` };
+  document.querySelectorAll('.chip[data-f]').forEach(c => { c.textContent = chipText[c.dataset.f]; c.classList.toggle('on', c.dataset.f === filter); });
+  document.querySelectorAll('tr.dev').forEach(tr => tr.addEventListener('click', () => toggleDevice(tr.dataset.id)));
+  document.querySelectorAll('th[data-sort]').forEach(th => {
+    th.textContent = th.textContent.replace(/ [↑↓]$/, '') + (th.dataset.sort === sortKey ? ' ↓' : '');
+  });
+  const nSel = selectedIds().length;
+  $('selCount').textContent = nSel ? `已选 ${nSel} 台` : '勾上设备再操作';
+  const shown = list.map(s => s.id);
+  $('selAll').checked = shown.length > 0 && shown.every(id => selected.has(id));
+  document.querySelectorAll('button.cmd').forEach(b => b.disabled = !nSel);
+  $('setBtn').classList.toggle('blue', pushOpen);
   const banList = Object.values(bans).sort((a, b) => (b.time || 0) - (a.time || 0));
-  $('banCount').textContent = banList.length ? `${banList.length} 个` : '';
-  $('bans').innerHTML = banList.map(b => `<tr><td>${esc(b.dir)}</td><td>${esc(b.id)}</td><td class="muted">${b.time ? ago(b.time) : ''}</td><td class="muted">${esc(b.device)} (${esc(b.range)})</td></tr>`).join('')
+  $('banTitle').textContent = `封号（${banList.length}）`;
+  $('bans').innerHTML = banList.map(b => `<tr><td>${esc(b.dir)}</td><td>${esc(b.id)}</td><td class="muted">${b.time ? ago(b.time) : ''}</td><td class="muted">${esc(b.device)}（${esc(b.range)}）</td></tr>`).join('')
     || '<tr><td class="muted">没有</td></tr>';
+  if (pushOpen) updateSend();
 }
 
 // ---- 开始 ----
